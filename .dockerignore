@@ -1,0 +1,8 @@
+.env
+secrets
+cache
+state
+config/torrserver
+.git
+tests/data
+__pycache__

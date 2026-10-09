@@ -1,0 +1,116 @@
+name: torrent-stream
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+services:
+  torrserver:
+    image: ghcr.io/yourok/torrserver:MatriX.144.1@sha256:4bf54fbd0cc095cdca8d854f95afee4223072ab7fdf378d0da50e5bb86dd8e77
+    user: "1000:1000"
+    entrypoint: ["/usr/bin/torrserver"]
+    command: ["--path", "/config", "--port", "8090", "--dontkill"]
+    environment:
+      GOMEMLIMIT: 512MiB
+      GODEBUG: madvdontneed=1
+    volumes:
+      - ./config/torrserver:/config
+      - ./cache:/cache
+    restart: unless-stopped
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: 2.0
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    logging: *logging
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8090/echo]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+  web:
+    build: .
+    user: "1000:1000"
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8787}
+      TORRSERVER_URL: http://torrserver:8090
+      GRACE_SECONDS: ${GRACE_SECONDS:-900}
+      TTL_SECONDS: ${TTL_SECONDS:-21600}
+      PAUSED_TTL_SECONDS: ${PAUSED_TTL_SECONDS:-10800}
+      NEVER_PLAYED_TTL_SECONDS: ${NEVER_PLAYED_TTL_SECONDS:-1800}
+      SWEEP_SECONDS: ${SWEEP_SECONDS:-5}
+      MAX_SESSIONS: ${MAX_SESSIONS:-1}
+      MAX_STREAMS: ${MAX_STREAMS:-4}
+      DISK_LIMIT_BYTES: ${DISK_LIMIT_BYTES:-64424509440}
+      MIN_FREE_BYTES: ${MIN_FREE_BYTES:-5368709120}
+      BUFFER_TARGET_BYTES: ${BUFFER_TARGET_BYTES:-536870912}
+      BUFFER_TIMEOUT_SECONDS: ${BUFFER_TIMEOUT_SECONDS:-300}
+      PREFETCH_CAP_BYTES: ${PREFETCH_CAP_BYTES:-53687091200}
+      INTERNAL_API_TOKEN_FILE: /run/secrets/internal_api_token
+    ports:
+      - "${BIND_IP:-0.0.0.0}:${WEB_PORT:-8787}:8787"
+    volumes:
+      - ./config/policy.json:/policy.json:ro
+      - ./state:/state
+      - ./cache:/cache
+    secrets: [internal_api_token]
+    depends_on:
+      torrserver:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 35s
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 1.5
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    logging: *logging
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health',timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+  telegram-bot:
+    build: .
+    profiles: [telegram]
+    user: "1000:1000"
+    command: ["python", "-m", "bot.main"]
+    environment:
+      WEB_URL: http://web:8787
+      INTERNAL_API_TOKEN_FILE: /run/secrets/internal_api_token
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS:-}
+      TELEGRAM_POLL_SECONDS: ${TELEGRAM_POLL_SECONDS:-25}
+      BOT_MAX_TORRENT_BYTES: ${BOT_MAX_TORRENT_BYTES:-1048576}
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./state:/state
+    secrets: [internal_api_token]
+    stop_grace_period: 20s
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    pids_limit: 48
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    logging: *logging
+    healthcheck:
+      test: [CMD, python, -m, bot.main, --healthcheck]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+secrets:
+  internal_api_token:
+    file: ./secrets/internal_api_token

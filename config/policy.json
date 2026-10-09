@@ -1,0 +1,23 @@
+{
+  "UseDisk": true,
+  "TorrentsSavePath": "/cache",
+  "RemoveCacheOnDrop": true,
+  "CacheSize": 268435456,
+  "ReaderReadAHead": 95,
+  "PreloadCache": 10,
+  "TorrentDisconnectTimeout": 240,
+  "ConnectionsLimit": 32,
+  "DisableUPNP": true,
+  "DisableUpload": true,
+  "EnableIPv6": false,
+  "EnableDLNA": false,
+  "EnableBonjour": false,
+  "EnableLPD": false,
+  "EnableRutorSearch": false,
+  "EnableTorznabSearch": false,
+  "RetrackersMode": 0,
+  "TrackersListURL": "",
+  "DefaultTrackers": "",
+  "ResponsiveMode": false,
+  "TrackTimecode": false
+}
