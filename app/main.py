@@ -291,7 +291,7 @@ def is_trusted_tv_client(request: Request) -> bool:
 async def protection(request, call_next):
     path = request.url.path
     public_api = path == "/api/status" or path.endswith("/play")
-    tv_api = path.startswith("/api/tv/")
+    tv_api = path.startswith("/api/tv/") or path == "/apk"
     if tv_api:
         if not is_trusted_tv_client(request):
             return JSONResponse({"detail": "No autorizado"}, status_code=401)
@@ -435,6 +435,45 @@ async def tv_listing(request: Request):
     base = str(request.base_url).rstrip("/")
     async with lock:
         return [public(s, base_url=base) for s in sessions.values() if s["state"] != "deleting"]
+
+
+@app.get("/api/tv/update")
+async def tv_apk_update_info(request: Request):
+    base = str(request.base_url).rstrip("/")
+    apk_path = STATE / "apk" / "homelab-tv-launcher.apk"
+    meta_path = STATE / "apk" / "version.json"
+    if not apk_path.is_file():
+        return {"available": False}
+    stat = apk_path.stat()
+    meta = {}
+    if meta_path.is_file():
+        with suppress(Exception):
+            meta = json.loads(meta_path.read_text())
+    sha256 = str(meta.get("sha256", "")).strip()
+    if not sha256:
+        sha256 = await asyncio.to_thread(lambda: hashlib.sha256(apk_path.read_bytes()).hexdigest())
+    return {
+        "available": True,
+        "version_code": int(meta.get("version_code", 1)),
+        "version_name": str(meta.get("version_name", "1.0.0")),
+        "sha256": sha256,
+        "size_bytes": stat.st_size,
+        "updated_at": int(stat.st_mtime),
+        "download_url": f"{base}/apk",
+    }
+
+
+@app.api_route("/apk", methods=["GET", "HEAD"])
+@app.api_route("/api/tv/apk", methods=["GET", "HEAD"])
+async def tv_download_apk():
+    apk_path = STATE / "apk" / "homelab-tv-launcher.apk"
+    if not apk_path.is_file():
+        raise HTTPException(404, "APK no disponible en el servidor")
+    return FileResponse(
+        apk_path,
+        media_type="application/vnd.android.package-archive",
+        filename="homelab-tv-launcher.apk",
+    )
 
 
 @app.post("/api/tv/sessions/{id}/pause")
