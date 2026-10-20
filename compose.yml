@@ -11,16 +11,16 @@ services:
     entrypoint: ["/usr/bin/torrserver"]
     command: ["--path", "/config", "--port", "8090", "--dontkill"]
     environment:
-      GOMEMLIMIT: 512MiB
+      GOMEMLIMIT: 1024MiB
       GODEBUG: madvdontneed=1
     volumes:
       - ./config/torrserver:/config
-      - ./cache:/cache
+      - /srv/media/torrent-stream-cache:/cache
     restart: unless-stopped
-    mem_limit: 768m
-    memswap_limit: 768m
-    cpus: 2.0
-    pids_limit: 128
+    mem_limit: 1280m
+    memswap_limit: 1280m
+    cpus: 3.0
+    pids_limit: 256
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     read_only: true
@@ -36,6 +36,7 @@ services:
     user: "1000:1000"
     environment:
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8787}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
       TORRSERVER_URL: http://torrserver:8090
       GRACE_SECONDS: ${GRACE_SECONDS:-900}
       TTL_SECONDS: ${TTL_SECONDS:-21600}
@@ -55,16 +56,16 @@ services:
     volumes:
       - ./config/policy.json:/policy.json:ro
       - ./state:/state
-      - ./cache:/cache
+      - /srv/media/torrent-stream-cache:/cache
     secrets: [internal_api_token]
     depends_on:
       torrserver:
         condition: service_healthy
     restart: unless-stopped
     stop_grace_period: 35s
-    mem_limit: 256m
-    memswap_limit: 256m
-    cpus: 1.5
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 2.0
     pids_limit: 64
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

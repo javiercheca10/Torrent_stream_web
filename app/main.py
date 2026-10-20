@@ -266,7 +266,6 @@ app.add_middleware(
                 "web",
                 "127.0.0.1",
                 "localhost",
-                "100.67.190.35",
                 "server",
                 "*.ts.net",
                 *os.getenv("ALLOWED_HOSTS", "").split(","),
