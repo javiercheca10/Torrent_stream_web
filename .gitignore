@@ -5,4 +5,8 @@ state/
 config/torrserver/
 __pycache__/
 .pytest_cache/
-tests/data/
+tests/
+test/
+**/tests/
+**/test/
+*test*.py

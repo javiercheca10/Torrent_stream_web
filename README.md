@@ -157,16 +157,6 @@ Accede a `http://<IP_SERVIDOR>:8787` desde cualquier dispositivo en la misma red
 
 ---
 
-## 🧪 Pruebas
-
-Para ejecutar las verificaciones y pruebas unitarias del backend:
-
-```bash
-python3 -m unittest discover tests
-```
-
----
-
 ## 🛡 Licencia
 
 Proyecto privado desarrollado para uso doméstico en red local.
