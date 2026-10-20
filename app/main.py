@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -67,7 +68,7 @@ def validate_torrent(data):
         pieces = info[b"pieces"]
         files = info.get(b"files", [{b"length": info.get(b"length")}])
         lengths = [f[b"length"] for f in files]
-        if not 16384 <= piece <= 16 * 1024 * 1024 or len(files) > 2000:
+        if not 16384 <= piece <= 64 * 1024 * 1024 or len(files) > 2000:
             raise ValueError()
         if any(not isinstance(n, int) or n < 0 for n in lengths):
             raise ValueError()
@@ -255,14 +256,47 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlsplit(PUBLIC).hostname, "web", "127.0.0.1", "localhost"])
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=list(
+        filter(
+            None,
+            [
+                urlsplit(PUBLIC).hostname,
+                "web",
+                "127.0.0.1",
+                "localhost",
+                "100.67.190.35",
+                "server",
+                "*.ts.net",
+                *os.getenv("ALLOWED_HOSTS", "").split(","),
+            ],
+        )
+    ),
+)
+
+
+def is_trusted_tv_client(request: Request) -> bool:
+    supplied = request.headers.get("X-Internal-Token", "")
+    if INTERNAL_API_TOKEN and secrets.compare_digest(supplied, INTERNAL_API_TOKEN):
+        return True
+    host = request.client.host if request.client else ""
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback or ip.is_private or ip in ipaddress.ip_network("100.64.0.0/10")
+    except ValueError:
+        return False
 
 
 @app.middleware("http")
 async def protection(request, call_next):
     path = request.url.path
     public_api = path == "/api/status" or path.endswith("/play")
-    if path.startswith("/api/") and not public_api:
+    tv_api = path.startswith("/api/tv/")
+    if tv_api:
+        if not is_trusted_tv_client(request):
+            return JSONResponse({"detail": "No autorizado"}, status_code=401)
+    elif path.startswith("/api/") and not public_api:
         supplied = request.headers.get("X-Internal-Token", "")
         if not secrets.compare_digest(supplied, INTERNAL_API_TOKEN):
             return JSONResponse({"detail": "No autorizado"}, status_code=401)
@@ -289,7 +323,8 @@ def get_session(id):
     return sessions[id]
 
 
-def public(s):
+def public(s, base_url=None):
+    base = (base_url or PUBLIC).rstrip("/")
     return {**{k: v for k, v in s.items() if k not in {"tasks", "hash", "bg", "owner_chat_id", "play_token"}},
             "active_streams": len(s["tasks"]),
             "paused": s.get("paused", False),
@@ -297,7 +332,7 @@ def public(s):
             "expires_at": s["created"] + TTL,
             "buffer_ready": s.get("buffered_bytes", 0) >= s.get("buffer_target", 1),
             "prefetched_bytes": s.get("prefetched_bytes", 0),
-            "play_url": f"{PUBLIC}/api/sessions/{s['id']}/play?token={s['play_token']}"}
+            "play_url": f"{base}/api/sessions/{s['id']}/play?token={s['play_token']}"}
 
 
 def status(s):
@@ -394,6 +429,76 @@ async def upload(request: Request):
 async def listing():
     async with lock:
         return [status(s) for s in sessions.values()]
+
+
+@app.get("/api/tv/sessions")
+async def tv_listing(request: Request):
+    base = str(request.base_url).rstrip("/")
+    async with lock:
+        return [public(s, base_url=base) for s in sessions.values() if s["state"] != "deleting"]
+
+
+@app.post("/api/tv/sessions/{id}/pause")
+async def tv_pause_session(id: str):
+    async with lock:
+        s = get_session(id)
+        if s["state"] == "deleting" or expiry(s, time.time()) == "ttl":
+            raise HTTPException(410, "Sesion terminada")
+        if not s.get("paused"):
+            s["paused"] = True
+            s["paused_at"] = time.time()
+            s["last_activity"] = time.time()
+            for task in list(s["tasks"]) + list(s["bg"]):
+                task.cancel()
+            persist()
+            log.info("session_paused_tv id=%s", id)
+        return {"ok": True, "paused_until": s["paused_at"] + PAUSED_TTL}
+
+
+@app.post("/api/tv/sessions/{id}/resume")
+async def tv_resume_session(id: str, request: Request):
+    base = str(request.base_url).rstrip("/")
+    async with lock:
+        s = get_session(id)
+        if s["state"] == "deleting" or expiry(s, time.time()) == "ttl":
+            raise HTTPException(410, "Sesion terminada")
+        for task in list(s["bg"]):
+            task.cancel()
+        s["paused"] = False
+        s["paused_at"] = None
+        s["buffered_bytes"] = 0
+        s["prefetched_bytes"] = 0
+        task = asyncio.create_task(warm(s), name="warmup")
+        s["bg"].add(task)
+        task.add_done_callback(lambda finished: s["bg"].discard(finished))
+        persist()
+        return public(s, base_url=base)
+
+
+@app.post("/api/tv/sessions/{id}/select")
+async def tv_select_file(id: str, request: Request):
+    body = await request.json()
+    base = str(request.base_url).rstrip("/")
+    async with lock:
+        s = get_session(id)
+        if s["tasks"] or s["state"] == "deleting":
+            raise HTTPException(409, "Deten la reproduccion antes de cambiar de archivo")
+        target_idx = body.get("index")
+        selected_file = next((f for f in s["files"] if f["id"] == target_idx), None)
+        if not selected_file:
+            raise HTTPException(400, "Indice de video invalido")
+        for task in list(s["bg"]):
+            task.cancel()
+        s["selected"] = target_idx
+        s["buffered_bytes"] = 0
+        s["prefetched_bytes"] = 0
+        s["buffer_target"] = min(BUFFER_TARGET, selected_file["length"])
+        if not s.get("paused"):
+            task = asyncio.create_task(warm(s), name="warmup")
+            s["bg"].add(task)
+            task.add_done_callback(lambda finished: s["bg"].discard(finished))
+        persist()
+        return public(s, base_url=base)
 
 
 @app.get("/api/sessions/{id}")
@@ -494,38 +599,72 @@ async def release(s, task, upstream):
 
 
 async def warm(s):
-    """Fill buffer to BUFFER_TARGET, then prefetch up to PREFETCH_CAP in background."""
+    """Fill buffer to BUFFER_TARGET (plus file tail for MKV/MP4 index), then prefetch up to PREFETCH_CAP when idle."""
+    selected_file = next((f for f in s["files"] if f["id"] == s["selected"]), max(s["files"], key=lambda f: f["length"]))
+    file_len = selected_file["length"]
     buf_target = s.get("buffer_target", BUFFER_TARGET)
-    prefetch_limit = min(PREFETCH_CAP, max(0, max(f["length"] for f in s["files"]) - buf_target))
-    current_pos = 0
+    prefetch_limit = min(PREFETCH_CAP, file_len) if file_len > buf_target else 0
+    current_pos = s.get("buffered_bytes", 0)
+    deadline = time.monotonic() + BUFFER_TIMEOUT
     try:
-        # Phase 1: fill initial buffer
-        async with asyncio.timeout(BUFFER_TIMEOUT):
-            async with client.stream("GET", "/stream", params={"link": s["hash"], "index": s["selected"], "play": ""},
-                                     headers={"Range": f"bytes=0-{buf_target-1}"}, timeout=BUFFER_TIMEOUT - 5) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_raw(65536):
-                    s["buffered_bytes"] += len(chunk)
-                    current_pos = s["buffered_bytes"]
+        # Phase 1: fill initial buffer with retry up to BUFFER_TIMEOUT
+        while current_pos < buf_target:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or s["state"] == "deleting" or s.get("paused"):
+                raise TimeoutError()
+            async with asyncio.timeout(remaining):
+                async with client.stream("GET", "/stream", params={"link": s["hash"], "index": s["selected"], "play": ""},
+                                         headers={"Range": f"bytes={current_pos}-{buf_target-1}"}, timeout=max(10, remaining - 2)) as response:
+                    response.raise_for_status()
+                    async for chunk in response.aiter_raw(65536):
+                        s["buffered_bytes"] += len(chunk)
+                        current_pos = s["buffered_bytes"]
+                        if s["tasks"]:
+                            break
+            if s["tasks"]:
+                break
+        # Pre-warm last 4 MiB of large files so MKV Cues / MP4 moov index at EOF load instantly
+        if file_len > buf_target and not s["tasks"]:
+            tail_start = max(buf_target, file_len - 4 * 1024 * 1024)
+            with suppress(httpx.HTTPError, TimeoutError):
+                async with asyncio.timeout(45):
+                    async with client.stream("GET", "/stream", params={"link": s["hash"], "index": s["selected"], "play": ""},
+                                             headers={"Range": f"bytes={tail_start}-{file_len-1}"}, timeout=40) as response:
+                        if response.status_code < 400:
+                            async for _ in response.aiter_raw(65536):
+                                if s["tasks"]:
+                                    break
         log.info("buffer_ready id=%s bytes=%s", s["id"], s["buffered_bytes"])
     except (httpx.HTTPError, TimeoutError):
-        log.warning("buffer_timeout id=%s; player may retry when peers are available", s["id"])
+        log.warning("buffer_timeout id=%s buffered=%s; player may still start when peers respond", s["id"], s["buffered_bytes"])
         return
-    # Phase 2: prefetch until PREFETCH_CAP, file end, session deleted, or disk pressure
+    # Phase 2: prefetch in 64 MiB blocks only while no active player stream is open (avoids HDD/cache thrashing)
+    chunk_window = 64 * 1024 * 1024
     try:
         while current_pos < prefetch_limit:
-            if asyncio.current_task().cancelled():
+            if asyncio.current_task().cancelled() or s["state"] == "deleting" or s.get("paused"):
                 break
-            end = min(current_pos + 65536 * 16, prefetch_limit) - 1
-            async with client.stream("GET", "/stream", params={"link": s["hash"], "index": s["selected"], "play": ""},
-                                     headers={"Range": f"bytes={current_pos}-{end}"}, timeout=30) as response:
-                if response.status_code >= 400:
-                    break
-                async for chunk in response.aiter_raw(65536):
-                    s["prefetched_bytes"] += len(chunk)
-                    current_pos += len(chunk)
+            if s["started"] and not s["tasks"] and time.time() - s["last_activity"] >= GRACE:
+                break
+            if s["tasks"]:
+                await asyncio.sleep(2)
+                continue
+            end = min(current_pos + chunk_window, prefetch_limit) - 1
+            try:
+                async with client.stream("GET", "/stream", params={"link": s["hash"], "index": s["selected"], "play": ""},
+                                         headers={"Range": f"bytes={current_pos}-{end}"}, timeout=120) as response:
+                    if response.status_code >= 400:
+                        await asyncio.sleep(3)
+                        continue
+                    async for chunk in response.aiter_raw(65536):
+                        s["prefetched_bytes"] += len(chunk)
+                        current_pos += len(chunk)
+                        if s["tasks"] or s["state"] == "deleting" or s.get("paused"):
+                            break
+            except (httpx.HTTPError, TimeoutError):
+                await asyncio.sleep(3)
         log.info("prefetch_done id=%s prefetched=%s", s["id"], s["prefetched_bytes"])
-    except (httpx.HTTPError, TimeoutError, asyncio.CancelledError):
+    except asyncio.CancelledError:
         log.info("prefetch_stopped id=%s prefetched=%s", s["id"], s["prefetched_bytes"])
 
 
@@ -546,7 +685,7 @@ async def play(id: str, request: Request):
             raise HTTPException(404, "Sesion no encontrada o caducada")
         if s["state"] != "ready" or s.get("paused") or expiry(s, time.time()):
             raise HTTPException(410, "Sesion terminada")
-        if s.get("buffered_bytes", 0) < s.get("buffer_target", 1):
+        if s.get("buffered_bytes", 0) < s.get("buffer_target", 1) and s["bg"]:
             retry = max(5, min(30, int((s["buffer_target"] - s.get("buffered_bytes", 0)) / 1024 / 1024)))
             return JSONResponse(
                 {"detail": "Buffer preparando", "buffered_bytes": s.get("buffered_bytes", 0),
@@ -564,7 +703,7 @@ async def play(id: str, request: Request):
         headers = {k: request.headers[k] for k in ("range", "if-range", "if-none-match", "if-modified-since") if k in request.headers}
         req = client.build_request(request.method, "/stream/" + quote(Path(file["path"]).name, safe=""),
                                    params={"link": hash, "index": index, "play": ""}, headers=headers,
-                                   timeout=httpx.Timeout(90, connect=5))
+                                   timeout=httpx.Timeout(300, connect=10))
         upstream = await client.send(req, stream=True)
         allowed = {"content-type", "content-length", "content-range", "accept-ranges", "etag", "last-modified"}
         headers = {k: v for k, v in upstream.headers.items() if k in allowed}

@@ -99,6 +99,20 @@ class AccessTests(unittest.TestCase):
         self.assertNotIn("play_token", result)
         self.assertNotIn("owner_chat_id", result)
 
+    def test_tv_client_trust_and_base_url(self):
+        lan_req = SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.1.55"))
+        ts_req = SimpleNamespace(headers={}, client=SimpleNamespace(host="100.93.25.79"))
+        pub_req = SimpleNamespace(headers={}, client=SimpleNamespace(host="8.8.8.8"))
+        self.assertTrue(m.is_trusted_tv_client(lan_req))
+        self.assertTrue(m.is_trusted_tv_client(ts_req))
+        self.assertFalse(m.is_trusted_tv_client(pub_req))
+        session = dict(id="s1", hash="a" * 40, owner_chat_id=123, play_token="tok123",
+                       created=1000, last_activity=1000, started=False, state="ready", files=[], selected=0,
+                       tasks=set(), bg=set(), paused=False, paused_at=None, buffered_bytes=20,
+                       prefetched_bytes=0, buffer_target=20, title="Film")
+        pub = m.public(session, base_url="http://10.0.0.10:8000")
+        self.assertEqual(pub["play_url"], "http://10.0.0.10:8000/api/sessions/s1/play?token=tok123")
+
 
 if __name__ == '__main__':
     unittest.main()
